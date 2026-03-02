@@ -1,0 +1,25 @@
+# Lytt container configuration.
+# OPENAI_API_KEY is read from the environment by the async-openai client.
+
+[general]
+data_dir = "/data"
+log_level = "info"
+
+[transcription]
+provider = "whisper"
+model = "whisper-1"
+
+[embedding]
+model = "text-embedding-3-small"
+dimensions = 1536
+
+[chunking]
+strategy = "temporal"
+
+[vector_store]
+path = "/data/lytt.db"
+
+[rag]
+enabled = true
+model = "gpt-4o-mini"
+max_chunks = 10
