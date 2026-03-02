@@ -3,18 +3,9 @@ FROM rust:1.82-bookworm AS builder
 
 WORKDIR /app
 
-# Cache dependency compilation separately from source code.
-# Only re-runs when Cargo.toml or Cargo.lock change.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && \
-    printf 'fn main() {}\n' > src/main.rs && \
-    printf 'pub fn placeholder() {}\n' > src/lib.rs && \
-    cargo build --release && \
-    rm -rf target/release/.fingerprint/lytt-*
-
-# Build the real source.
 COPY src ./src
-RUN touch src/main.rs src/lib.rs && cargo build --release
+RUN cargo build --release
 
 # ── Stage 2: Minimal runtime ─────────────────────────────────────────────────
 FROM debian:bookworm-slim
