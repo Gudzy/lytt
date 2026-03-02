@@ -52,8 +52,6 @@ impl YoutubeSource {
                 "--no-download",
                 "--no-warnings",
                 "--ignore-errors",
-                "--extractor-args",
-                "youtube:player_client=ios,tv_embedded",
                 &url,
             ])
             .output()

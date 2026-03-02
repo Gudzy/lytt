@@ -36,7 +36,6 @@ pub async fn download_audio(url: &str, video_id: &str, output_dir: &Path) -> Res
         .arg("--no-playlist")
         .arg("--quiet")
         .arg("--no-warnings")
-        .arg("--extractor-args").arg("youtube:player_client=ios,tv_embedded")
         .arg(url)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
