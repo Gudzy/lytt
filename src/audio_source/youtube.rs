@@ -52,6 +52,8 @@ impl YoutubeSource {
                 "--no-download",
                 "--no-warnings",
                 "--ignore-errors",
+                "--username", "oauth2",
+                "--password", "",
                 "--extractor-args",
                 "youtube:player_client=ios,tv_embedded",
                 &url,

@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ffmpeg \
-    && pip3 install yt-dlp --break-system-packages \
+    && pip3 install yt-dlp yt-dlp-plugin-oauth2 --break-system-packages \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/lytt /usr/local/bin/lytt
@@ -27,8 +27,13 @@ RUN mkdir -p /data /root/.config/lytt
 # Bake in a minimal config. OPENAI_API_KEY is supplied as an env var at runtime.
 COPY docker/config.toml /root/.config/lytt/config.toml
 
+# Entrypoint writes the OAuth2 token from YTDLP_OAUTH2_TOKEN env var (if set).
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 WORKDIR /data
 
 EXPOSE 8080
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["lytt", "serve", "--host", "0.0.0.0", "--port", "8080"]
