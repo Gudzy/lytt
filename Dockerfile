@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     ffmpeg \
-    && pip3 install yt-dlp --break-system-packages \
+    && pip3 install --no-cache-dir --upgrade yt-dlp --break-system-packages \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/lytt /usr/local/bin/lytt
