@@ -6,30 +6,31 @@ if [ -n "$YTDLP_COOKIES" ]; then
 import os, base64, sys
 
 raw = os.environ['YTDLP_COOKIES'].strip()
-sys.stderr.write('[entrypoint] YTDLP_COOKIES present, length=%d\n' % len(raw))
+sys.stderr.write('[entrypoint] YTDLP_COOKIES length=%d\n' % len(raw))
 
 try:
     data = base64.b64decode(raw)
-    sys.stderr.write('[entrypoint] base64 decoded: %d bytes\n' % len(data))
 except Exception as e:
     sys.stderr.write('[entrypoint] base64 decode FAILED: %s\n' % e)
-    open('/tmp/yt-cookies.txt', 'w').close()
+    open('/tmp/yt-cookies.txt', 'wb').close()
     sys.exit(0)
 
-for enc in ('utf-8-sig', 'utf-16', 'latin-1'):
-    try:
-        text = data.decode(enc)
-        # Normalize to Unix line endings
-        text = text.replace('\r\n', '\n').replace('\r', '\n')
-        with open('/tmp/yt-cookies.txt', 'w', encoding='utf-8') as f:
-            f.write(text)
-        lines = [l for l in text.splitlines() if l.strip() and not l.startswith('#')]
-        sys.stderr.write('[entrypoint] cookies written (%s): %d cookie entries\n' % (enc, len(lines)))
-        if lines:
-            sys.stderr.write('[entrypoint] first cookie domain: %s\n' % lines[0].split('\t')[0])
-        break
-    except Exception as e:
-        sys.stderr.write('[entrypoint] decode failed (%s): %s\n' % (enc, e))
+# Handle BOMs and encoding: convert everything to UTF-8 bytes
+if data[:2] in (b'\xff\xfe', b'\xfe\xff'):
+    sys.stderr.write('[entrypoint] detected UTF-16, converting to UTF-8\n')
+    data = data.decode('utf-16').encode('utf-8')
+elif data[:3] == b'\xef\xbb\xbf':
+    sys.stderr.write('[entrypoint] detected UTF-8 BOM, stripping\n')
+    data = data[3:]
+
+# Normalize line endings to Unix
+data = data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+
+with open('/tmp/yt-cookies.txt', 'wb') as f:
+    f.write(data)
+
+first = data.split(b'\n')[0].decode('utf-8', errors='replace')
+sys.stderr.write('[entrypoint] first line: %s\n' % first)
 " 2>&1
 else
     touch /tmp/yt-cookies.txt
