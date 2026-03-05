@@ -52,6 +52,7 @@ impl YoutubeSource {
                 "--no-download",
                 "--no-warnings",
                 "--ignore-errors",
+                "--cookies", "/tmp/yt-cookies.txt",
                 &url,
             ])
             .output()
@@ -154,6 +155,7 @@ impl AudioSource for YoutubeSource {
                 "--flat-playlist",
                 "--playlist-end",
                 &limit_str,
+                "--cookies", "/tmp/yt-cookies.txt",
                 source,
             ])
             .output()

@@ -36,6 +36,7 @@ pub async fn download_audio(url: &str, video_id: &str, output_dir: &Path) -> Res
         .arg("--no-playlist")
         .arg("--quiet")
         .arg("--no-warnings")
+        .arg("--cookies").arg("/tmp/yt-cookies.txt")
         .arg(url)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
