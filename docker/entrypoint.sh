@@ -41,8 +41,9 @@ fi
 # bgutil-ytdlp-pot-provider generates Proof-of-Origin tokens that yt-dlp uses
 # automatically via the yt-dlp-get-pot plugin.
 echo '[entrypoint] Starting bgutil PO token service...' >&2
-bgutil-ytdlp-pot-provider serve &
-sleep 2
-echo '[entrypoint] bgutil started' >&2
+cd /bgutil-server && node build/main.js &
+cd /data
+sleep 3
+echo '[entrypoint] bgutil started on port 4416' >&2
 
 exec "$@"

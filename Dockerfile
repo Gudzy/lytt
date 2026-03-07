@@ -1,3 +1,7 @@
+# ── Stage 0: bgutil PO token server ─────────────────────────────────────────
+# Copies the pre-built bgutil server (Node.js + compiled JS) from the official image.
+FROM brainicism/bgutil-ytdlp-pot-provider:node AS bgutil-server
+
 # ── Stage 1: Rust build ─────────────────────────────────────────────────────
 FROM rust:1.83-bookworm AS builder
 
@@ -10,14 +14,12 @@ RUN cargo build --release
 # ── Stage 2: Minimal runtime ─────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-# yt-dlp requires Python 3 and ffmpeg. Node.js is required by bgutil-ytdlp-pot-provider
-# to generate YouTube Proof-of-Origin tokens (needed for cloud IP bot detection bypass).
+# yt-dlp requires Python 3 and ffmpeg.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     python3 \
     python3-pip \
     ffmpeg \
-    nodejs \
     && pip3 install --no-cache-dir --upgrade \
         yt-dlp \
         yt-dlp-get-pot \
@@ -26,6 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/lytt /usr/local/bin/lytt
+
+# Copy Node.js binary and bgutil server from the official bgutil image.
+# bgutil generates YouTube Proof-of-Origin tokens needed from cloud/datacenter IPs.
+COPY --from=bgutil-server /usr/local/bin/node /usr/local/bin/node
+COPY --from=bgutil-server /app /bgutil-server
 
 # Runtime data directory for SQLite vector store.
 RUN mkdir -p /data /root/.config/lytt
