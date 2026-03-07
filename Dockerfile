@@ -35,6 +35,9 @@ COPY --from=builder /app/target/release/lytt /usr/local/bin/lytt
 COPY --from=bgutil-server /usr/local/bin/node /usr/local/bin/node
 COPY --from=bgutil-server /app /bgutil-server
 
+# yt-dlp and GetPOT look for 'nodejs' (Debian package name) to detect the JS runtime.
+RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs
+
 # bgutil-ytdlp-pot-provider's script-node provider looks for scripts at this path.
 # Symlink our /bgutil-server to the expected location.
 RUN mkdir -p /root/bgutil-ytdlp-pot-provider && \
