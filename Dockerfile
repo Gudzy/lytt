@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         yt-dlp \
         yt-dlp-ejs \
         "yt-dlp-get-pot<0.3.0" \
-        bgutil-ytdlp-pot-provider \
+        "bgutil-ytdlp-pot-provider==1.3.0" \
         --break-system-packages \
     && rm -rf /var/lib/apt/lists/*
 
