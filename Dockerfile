@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatomic1 \
     && pip3 install --no-cache-dir --upgrade \
         yt-dlp \
+        yt-dlp-ejs \
         "yt-dlp-get-pot<0.3.0" \
         bgutil-ytdlp-pot-provider \
         --break-system-packages \
@@ -44,10 +45,13 @@ RUN mkdir -p /root/bgutil-ytdlp-pot-provider && \
     ln -s /bgutil-server /root/bgutil-ytdlp-pot-provider/server
 
 # Runtime data directory for SQLite vector store.
-RUN mkdir -p /data /root/.config/lytt
+RUN mkdir -p /data /root/.config/lytt /root/.config/yt-dlp
 
 # Bake in a minimal config. OPENAI_API_KEY is supplied as an env var at runtime.
 COPY docker/config.toml /root/.config/lytt/config.toml
+
+# yt-dlp config: enable Node.js EJS runtime (deno-only by default).
+COPY docker/yt-dlp.conf /root/.config/yt-dlp/config
 
 # Entrypoint: write YouTube cookies from env var before starting lytt.
 COPY docker/entrypoint.sh /entrypoint.sh
