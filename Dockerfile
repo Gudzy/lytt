@@ -35,6 +35,11 @@ COPY --from=builder /app/target/release/lytt /usr/local/bin/lytt
 COPY --from=bgutil-server /usr/local/bin/node /usr/local/bin/node
 COPY --from=bgutil-server /app /bgutil-server
 
+# bgutil-ytdlp-pot-provider's script-node provider looks for scripts at this path.
+# Symlink our /bgutil-server to the expected location.
+RUN mkdir -p /root/bgutil-ytdlp-pot-provider && \
+    ln -s /bgutil-server /root/bgutil-ytdlp-pot-provider/server
+
 # Runtime data directory for SQLite vector store.
 RUN mkdir -p /data /root/.config/lytt
 
