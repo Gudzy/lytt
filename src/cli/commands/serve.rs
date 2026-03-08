@@ -15,13 +15,17 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use crate::audio_source::parse_input;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
 /// Shared application state.
 struct AppState {
     orchestrator: Orchestrator,
     settings: Settings,
+    /// Tracks media IDs currently being processed in the background.
+    processing_jobs: Mutex<HashSet<String>>,
 }
 
 /// Run the HTTP API server.
@@ -31,6 +35,7 @@ pub async fn run_serve(host: &str, port: u16, settings: Settings) -> anyhow::Res
     let state = Arc::new(AppState {
         orchestrator,
         settings,
+        processing_jobs: Mutex::new(HashSet::new()),
     });
 
     let cors = CorsLayer::new()
@@ -199,27 +204,86 @@ async fn transcribe(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TranscribeRequest>,
 ) -> impl IntoResponse {
-    match state.orchestrator.process_media(&req.input, req.force).await {
-        Ok(result) => Json(TranscribeResponse {
-            success: true,
-            media_id: result.media_id,
-            title: result.title,
-            chunks_indexed: result.chunks_indexed,
-            error: None,
-        })
-        .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(TranscribeResponse {
-                success: false,
-                media_id: String::new(),
-                title: String::new(),
-                chunks_indexed: 0,
-                error: Some(e.to_string()),
-            }),
-        )
-            .into_response(),
+    // Extract media ID without downloading.
+    let media_id = match parse_input(&req.input) {
+        Some((_, id)) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(TranscribeResponse {
+                    success: false,
+                    media_id: String::new(),
+                    title: String::new(),
+                    chunks_indexed: 0,
+                    error: Some("Unsupported input format".to_string()),
+                }),
+            )
+                .into_response()
+        }
+    };
+
+    // Fast path: already indexed in the vector store — return immediately.
+    if !req.force {
+        if let Ok(chunks) = state.orchestrator.vector_store().get_by_video_id(&media_id).await {
+            if !chunks.is_empty() {
+                let title = chunks.first().map(|c| c.video_title.clone()).unwrap_or_default();
+                return Json(TranscribeResponse {
+                    success: true,
+                    media_id,
+                    title,
+                    chunks_indexed: chunks.len(),
+                    error: None,
+                })
+                .into_response();
+            }
+        }
     }
+
+    // Already being processed in the background — return 202.
+    {
+        let jobs = state.processing_jobs.lock().unwrap();
+        if jobs.contains(&media_id) {
+            return (
+                StatusCode::ACCEPTED,
+                Json(TranscribeResponse {
+                    success: true,
+                    media_id,
+                    title: String::new(),
+                    chunks_indexed: 0,
+                    error: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    // Kick off background processing and return 202 immediately.
+    {
+        let mut jobs = state.processing_jobs.lock().unwrap();
+        jobs.insert(media_id.clone());
+    }
+
+    let state_clone = Arc::clone(&state);
+    let input = req.input.clone();
+    let force = req.force;
+    let media_id_bg = media_id.clone();
+    tokio::spawn(async move {
+        let _ = state_clone.orchestrator.process_media(&input, force).await;
+        let mut jobs = state_clone.processing_jobs.lock().unwrap();
+        jobs.remove(&media_id_bg);
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(TranscribeResponse {
+            success: true,
+            media_id,
+            title: String::new(),
+            chunks_indexed: 0,
+            error: None,
+        }),
+    )
+        .into_response()
 }
 
 async fn search(
