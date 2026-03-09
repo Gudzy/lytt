@@ -58,6 +58,7 @@ pub mod openai;
 pub mod orchestrator;
 pub mod rag;
 pub mod transcription;
+pub mod util;
 pub mod vector_store;
 
 pub use error::{Result, LyttError};

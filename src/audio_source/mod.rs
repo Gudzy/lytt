@@ -69,16 +69,7 @@ impl MediaMetadata {
 
     /// Format seconds as MM:SS or HH:MM:SS.
     pub fn format_timestamp(seconds: f64) -> String {
-        let total_seconds = seconds as u32;
-        let hours = total_seconds / 3600;
-        let minutes = (total_seconds % 3600) / 60;
-        let secs = total_seconds % 60;
-
-        if hours > 0 {
-            format!("{:02}:{:02}:{:02}", hours, minutes, secs)
-        } else {
-            format!("{:02}:{:02}", minutes, secs)
-        }
+        crate::util::format_seconds(seconds)
     }
 }
 

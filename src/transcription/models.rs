@@ -51,7 +51,7 @@ impl WordLevelTranscript {
 
     /// Serialize words to JSON for fusion prompt.
     pub fn words_to_json(&self) -> String {
-        serde_json::to_string_pretty(&self.words).unwrap_or_default()
+        serde_json::to_string_pretty(&self.words).unwrap_or_else(|_| "[]".to_string())
     }
 }
 
@@ -110,9 +110,9 @@ impl Transcript {
             .join(" ");
 
         let duration_seconds = segments
-            .last()
+            .iter()
             .map(|s| s.end_seconds)
-            .unwrap_or(0.0);
+            .fold(0.0_f64, f64::max);
 
         Self {
             video_id,
@@ -175,16 +175,7 @@ impl TranscriptSegment {
 
 /// Format seconds as MM:SS or HH:MM:SS.
 pub fn format_timestamp(seconds: f64) -> String {
-    let total_seconds = seconds as u32;
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let secs = total_seconds % 60;
-
-    if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, secs)
-    } else {
-        format!("{:02}:{:02}", minutes, secs)
-    }
+    crate::util::format_seconds(seconds)
 }
 
 #[cfg(test)]

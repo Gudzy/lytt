@@ -235,12 +235,12 @@ impl Orchestrator {
             return Ok(0);
         }
 
-        // Delete existing documents for this media
-        self.vector_store.delete_by_video_id(&metadata.id).await?;
-
-        // Generate embeddings in batch
+        // Generate embeddings before deleting — if this fails, existing data is preserved.
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         let embeddings = self.embedder.embed_batch(&texts).await?;
+
+        // Delete only after embeddings are ready.
+        self.vector_store.delete_by_video_id(&metadata.id).await?;
 
         // Create documents
         let documents: Vec<Document> = chunks
@@ -303,12 +303,12 @@ impl Orchestrator {
 
         let chunks = chunker.chunk(&transcript, &config).await?;
 
-        // Delete old chunks
-        self.vector_store.delete_by_video_id(video_id).await?;
-
-        // Generate new embeddings
+        // Generate embeddings before deleting — if this fails, existing data is preserved.
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         let embeddings = self.embedder.embed_batch(&texts).await?;
+
+        // Delete old chunks only after embeddings are ready.
+        self.vector_store.delete_by_video_id(video_id).await?;
 
         // Create documents
         let documents: Vec<Document> = chunks
