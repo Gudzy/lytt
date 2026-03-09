@@ -5,22 +5,6 @@ use crate::error::{Result, LyttError};
 use async_trait::async_trait;
 use regex::Regex;
 
-/// Return the yt-dlp authentication arguments for the current environment.
-///
-/// Prefers OAuth2 when a token was loaded by entrypoint.sh (signalled by the
-/// presence of `/tmp/yt-auth-oauth2`). Falls back to the cookies file otherwise.
-///
-/// Both paths are set up by entrypoint.sh at container startup:
-/// - OAuth2:  set `YTDLP_OAUTH_TOKEN` (base64 JSON) — lasts months, auto-refreshes.
-/// - Cookies: set `YTDLP_COOKIES`     (base64 Netscape) — fallback, ~4-week rotation.
-fn yt_auth_args() -> Vec<&'static str> {
-    if std::path::Path::new("/tmp/yt-auth-oauth2").exists() {
-        vec!["--username", "oauth2", "--password", ""]
-    } else {
-        vec!["--cookies", "/tmp/yt-cookies.txt"]
-    }
-}
-
 /// YouTube audio source.
 pub struct YoutubeSource {
     video_id_regex: Regex,
@@ -63,10 +47,15 @@ impl YoutubeSource {
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
 
         let output = tokio::process::Command::new("yt-dlp")
-            .args(["--dump-json", "--no-download", "--no-warnings", "--ignore-errors"])
-            .args(yt_auth_args())
-            .args(["--extractor-args", "youtube:player_client=web"])
-            .arg(&url)
+            .args([
+                "--dump-json",
+                "--no-download",
+                "--no-warnings",
+                "--ignore-errors",
+                "--cookies", "/tmp/yt-cookies.txt",
+                "--extractor-args", "youtube:player_client=web",
+                &url,
+            ])
             .output()
             .await
             .map_err(|e| {
@@ -159,11 +148,17 @@ impl AudioSource for YoutubeSource {
         let limit_str = limit.map(|l| l.to_string()).unwrap_or_else(|| "50".to_string());
 
         let output = tokio::process::Command::new("yt-dlp")
-            .args(["--dump-json", "--no-download", "--no-warnings", "--flat-playlist",
-                   "--playlist-end", &limit_str])
-            .args(yt_auth_args())
-            .args(["--extractor-args", "youtube:player_client=web"])
-            .arg(source)
+            .args([
+                "--dump-json",
+                "--no-download",
+                "--no-warnings",
+                "--flat-playlist",
+                "--playlist-end",
+                &limit_str,
+                "--cookies", "/tmp/yt-cookies.txt",
+                "--extractor-args", "youtube:player_client=web",
+                source,
+            ])
             .output()
             .await
             .map_err(|e| {
