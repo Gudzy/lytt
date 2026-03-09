@@ -1,6 +1,43 @@
 #!/bin/sh
-# Write YouTube cookies from the YTDLP_COOKIES environment variable.
-# If not set, create an empty file so yt-dlp doesn't error on the --cookies flag.
+# Authentication setup for yt-dlp.
+#
+# Priority:
+#   1. OAuth2  — set YTDLP_OAUTH_TOKEN (base64-encoded JSON) to enable.
+#                Persists for months; auto-refreshes on each use.
+#   2. Cookies — set YTDLP_COOKIES (base64-encoded Netscape format) as fallback.
+#                Requires manual rotation every ~4 weeks.
+#
+# lytt checks /tmp/yt-auth-oauth2 at request time to decide which method to use.
+
+# ── OAuth2 (primary) ─────────────────────────────────────────────────────────
+if [ -n "$YTDLP_OAUTH_TOKEN" ]; then
+    python3 -c "
+import os, base64, sys, json
+
+raw = os.environ['YTDLP_OAUTH_TOKEN'].strip()
+sys.stderr.write('[entrypoint] YTDLP_OAUTH_TOKEN length=%d\n' % len(raw))
+
+try:
+    data = base64.b64decode(raw).decode('utf-8')
+    json.loads(data)  # validate JSON
+except Exception as e:
+    sys.stderr.write('[entrypoint] OAuth2 token decode FAILED: %s\n' % e)
+    sys.exit(0)
+
+import os as _os
+_os.makedirs('/root/.cache/yt-dlp/youtube', exist_ok=True)
+with open('/root/.cache/yt-dlp/youtube/oauth2_access_token.json', 'w') as f:
+    f.write(data)
+
+# Signal file: lytt checks this to decide which auth method to use.
+open('/tmp/yt-auth-oauth2', 'w').close()
+sys.stderr.write('[entrypoint] OAuth2 token loaded — using OAuth2 auth\n')
+" 2>&1
+fi
+
+# ── Cookies (fallback) ────────────────────────────────────────────────────────
+# Always set up cookie file. Even when OAuth2 is active, having cookies decoded
+# costs nothing and lets you switch back without a redeploy.
 if [ -n "$YTDLP_COOKIES" ]; then
     python3 -c "
 import os, base64, sys
@@ -30,16 +67,18 @@ with open('/tmp/yt-cookies.txt', 'wb') as f:
     f.write(data)
 
 first = data.split(b'\n')[0].decode('utf-8', errors='replace')
-sys.stderr.write('[entrypoint] first line: %s\n' % first)
+sys.stderr.write('[entrypoint] cookies loaded, first line: %s\n' % first)
 " 2>&1
 else
     touch /tmp/yt-cookies.txt
-    echo '[entrypoint] YTDLP_COOKIES not set, cookie file is empty' >&2
+    if [ ! -f /tmp/yt-auth-oauth2 ]; then
+        echo '[entrypoint] WARNING: neither YTDLP_OAUTH_TOKEN nor YTDLP_COOKIES set — YouTube downloads may fail' >&2
+    fi
 fi
 
-# Start bgutil PO token service in background (needed for YouTube from cloud IPs).
-# bgutil-ytdlp-pot-provider generates Proof-of-Origin tokens that yt-dlp uses
-# automatically via the yt-dlp-get-pot plugin.
+# ── bgutil PO token service ───────────────────────────────────────────────────
+# Generates YouTube Proof-of-Origin tokens needed from cloud/datacenter IPs.
+# Required regardless of authentication method.
 echo '[entrypoint] Starting bgutil PO token service...' >&2
 cd /bgutil-server && node build/main.js &
 cd /data
