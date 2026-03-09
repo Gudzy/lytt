@@ -13,6 +13,34 @@ use std::path::Path;
 use std::sync::Mutex;
 use tracing::{debug, info, instrument};
 
+/// DDL executed once on connection open to create/migrate the schema.
+const SCHEMA_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS documents (
+        id TEXT PRIMARY KEY,
+        video_id TEXT NOT NULL,
+        video_title TEXT NOT NULL,
+        section_title TEXT,
+        content TEXT NOT NULL,
+        start_seconds REAL NOT NULL,
+        end_seconds REAL NOT NULL,
+        embedding BLOB NOT NULL,
+        chunk_order INTEGER NOT NULL,
+        source_created_at TEXT,
+        indexed_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_documents_video_id ON documents(video_id);
+    CREATE INDEX IF NOT EXISTS idx_documents_indexed_at ON documents(indexed_at);
+
+    CREATE TABLE IF NOT EXISTS transcripts (
+        video_id TEXT PRIMARY KEY,
+        video_title TEXT NOT NULL,
+        transcript_json TEXT NOT NULL,
+        duration_seconds REAL NOT NULL,
+        transcribed_at TEXT NOT NULL
+    );
+"#;
+
 /// SQLite-based vector store.
 pub struct SqliteVectorStore {
     conn: Mutex<Connection>,
@@ -32,35 +60,7 @@ impl SqliteVectorStore {
         // Enable WAL mode for better concurrent performance
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
 
-        // Create tables
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                video_id TEXT NOT NULL,
-                video_title TEXT NOT NULL,
-                section_title TEXT,
-                content TEXT NOT NULL,
-                start_seconds REAL NOT NULL,
-                end_seconds REAL NOT NULL,
-                embedding BLOB NOT NULL,
-                chunk_order INTEGER NOT NULL,
-                source_created_at TEXT,
-                indexed_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_documents_video_id ON documents(video_id);
-            CREATE INDEX IF NOT EXISTS idx_documents_indexed_at ON documents(indexed_at);
-
-            CREATE TABLE IF NOT EXISTS transcripts (
-                video_id TEXT PRIMARY KEY,
-                video_title TEXT NOT NULL,
-                transcript_json TEXT NOT NULL,
-                duration_seconds REAL NOT NULL,
-                transcribed_at TEXT NOT NULL
-            );
-            "#,
-        )?;
+        conn.execute_batch(SCHEMA_SQL)?;
 
         info!("Initialized SQLite vector store at {:?}", path);
 
@@ -73,33 +73,7 @@ impl SqliteVectorStore {
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
 
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                video_id TEXT NOT NULL,
-                video_title TEXT NOT NULL,
-                section_title TEXT,
-                content TEXT NOT NULL,
-                start_seconds REAL NOT NULL,
-                end_seconds REAL NOT NULL,
-                embedding BLOB NOT NULL,
-                chunk_order INTEGER NOT NULL,
-                source_created_at TEXT,
-                indexed_at TEXT NOT NULL
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_documents_video_id ON documents(video_id);
-
-            CREATE TABLE IF NOT EXISTS transcripts (
-                video_id TEXT PRIMARY KEY,
-                video_title TEXT NOT NULL,
-                transcript_json TEXT NOT NULL,
-                duration_seconds REAL NOT NULL,
-                transcribed_at TEXT NOT NULL
-            );
-            "#,
-        )?;
+        conn.execute_batch(SCHEMA_SQL)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -233,7 +207,9 @@ impl VectorStore for SqliteVectorStore {
             let indexed_at_str: String = row.get(10)?;
 
             Ok(Document {
-                id: uuid::Uuid::parse_str(&id_str).unwrap_or_default(),
+                id: uuid::Uuid::parse_str(&id_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                })?,
                 video_id: row.get(1)?,
                 video_title: row.get(2)?,
                 section_title: row.get(3)?,
@@ -379,7 +355,9 @@ impl VectorStore for SqliteVectorStore {
             let indexed_at_str: String = row.get(10)?;
 
             Ok(Document {
-                id: uuid::Uuid::parse_str(&id_str).unwrap_or_default(),
+                id: uuid::Uuid::parse_str(&id_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+                })?,
                 video_id: row.get(1)?,
                 video_title: row.get(2)?,
                 section_title: row.get(3)?,

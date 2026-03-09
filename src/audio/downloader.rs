@@ -263,19 +263,24 @@ async fn probe_duration(path: &Path) -> Result<f64> {
 mod tests {
     use super::*;
 
+    /// Integration test — verifies yt-dlp, ffmpeg, and ffprobe are installed.
+    /// Run with: cargo test -- --ignored
     #[tokio::test]
+    #[ignore = "requires yt-dlp, ffmpeg, and ffprobe in PATH"]
     async fn test_required_tools_exist() {
-        // Verify external dependencies are available
-        let checks = [
-            Command::new("which").arg("yt-dlp").output().await,
-            Command::new("which").arg("ffmpeg").output().await,
-            Command::new("which").arg("ffprobe").output().await,
+        let tools: &[(&str, &[&str])] = &[
+            ("yt-dlp",  &["--version"]),
+            ("ffmpeg",  &["-version"]),
+            ("ffprobe", &["-version"]),
         ];
 
-        for check in checks {
-            if let Ok(output) = check {
-                assert!(output.status.success() || true); // Soft check
-            }
+        for (tool, args) in tools {
+            let output = Command::new(tool)
+                .args(*args)
+                .output()
+                .await
+                .unwrap_or_else(|e| panic!("{tool} not found: {e}"));
+            assert!(output.status.success(), "{tool} exited with error");
         }
     }
 }

@@ -183,7 +183,7 @@ impl Orchestrator {
         // Chunk
         info!("Chunking transcript...");
         eprintln!("  Chunking transcript...");
-        let chunks = self.chunk_transcript(&transcript, &metadata).await?;
+        let chunks = self.chunk_transcript(&transcript).await?;
         eprintln!("  Created {} chunks", chunks.len());
 
         // Index
@@ -206,11 +206,7 @@ impl Orchestrator {
     }
 
     /// Chunk a transcript.
-    async fn chunk_transcript(
-        &self,
-        transcript: &Transcript,
-        _metadata: &MediaMetadata,
-    ) -> Result<Vec<ContentChunk>> {
+    async fn chunk_transcript(&self, transcript: &Transcript) -> Result<Vec<ContentChunk>> {
         let strategy: ChunkingStrategy = self
             .settings
             .chunking

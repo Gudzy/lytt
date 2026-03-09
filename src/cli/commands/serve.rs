@@ -4,7 +4,7 @@
 
 use crate::cli::Output;
 use crate::config::Settings;
-use crate::embedding::{Embedder, OpenAIEmbedder};
+use crate::embedding::Embedder;
 use crate::orchestrator::Orchestrator;
 use crate::rag::RagEngine;
 use axum::{
@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use crate::audio_source::parse_input;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tower_http::cors::{Any, CorsLayer};
 
@@ -26,6 +26,8 @@ struct AppState {
     settings: Settings,
     /// Tracks media IDs currently being processed in the background.
     processing_jobs: Mutex<HashSet<String>>,
+    /// Tracks media IDs whose background processing failed, with the error message.
+    failed_jobs: Mutex<HashMap<String, String>>,
 }
 
 /// Run the HTTP API server.
@@ -36,6 +38,7 @@ pub async fn run_serve(host: &str, port: u16, settings: Settings) -> anyhow::Res
         orchestrator,
         settings,
         processing_jobs: Mutex::new(HashSet::new()),
+        failed_jobs: Mutex::new(HashMap::new()),
     });
 
     let cors = CorsLayer::new()
@@ -239,38 +242,53 @@ async fn transcribe(
         }
     }
 
-    // Already being processed in the background — return 202.
-    {
-        let jobs = state.processing_jobs.lock().unwrap();
+    // Atomic check-and-insert: if already in-flight return 202; otherwise claim the slot.
+    // A single lock acquisition prevents duplicate background tasks for the same media ID.
+    let already_processing = {
+        let mut jobs = state.processing_jobs.lock().unwrap();
         if jobs.contains(&media_id) {
-            return (
-                StatusCode::ACCEPTED,
-                Json(TranscribeResponse {
-                    success: true,
-                    media_id,
-                    title: String::new(),
-                    chunks_indexed: 0,
-                    error: None,
-                }),
-            )
-                .into_response();
+            true
+        } else {
+            jobs.insert(media_id.clone());
+            false
         }
+    };
+
+    if already_processing {
+        return (
+            StatusCode::ACCEPTED,
+            Json(TranscribeResponse {
+                success: true,
+                media_id,
+                title: String::new(),
+                chunks_indexed: 0,
+                error: None,
+            }),
+        )
+            .into_response();
     }
 
     // Kick off background processing and return 202 immediately.
-    {
-        let mut jobs = state.processing_jobs.lock().unwrap();
-        jobs.insert(media_id.clone());
-    }
-
     let state_clone = Arc::clone(&state);
     let input = req.input.clone();
     let force = req.force;
     let media_id_bg = media_id.clone();
     tokio::spawn(async move {
-        let _ = state_clone.orchestrator.process_media(&input, force).await;
-        let mut jobs = state_clone.processing_jobs.lock().unwrap();
-        jobs.remove(&media_id_bg);
+        let result = state_clone.orchestrator.process_media(&input, force).await;
+        {
+            let mut jobs = state_clone.processing_jobs.lock().unwrap();
+            jobs.remove(&media_id_bg);
+        }
+        match result {
+            Ok(_) => {
+                // Clear any prior failure entry on successful (re-)processing.
+                state_clone.failed_jobs.lock().unwrap().remove(&media_id_bg);
+            }
+            Err(e) => {
+                tracing::error!("Background transcription failed for {}: {}", media_id_bg, e);
+                state_clone.failed_jobs.lock().unwrap().insert(media_id_bg, e.to_string());
+            }
+        }
     });
 
     (
@@ -290,13 +308,8 @@ async fn search(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> impl IntoResponse {
-    let embedder = OpenAIEmbedder::with_config(
-        &state.settings.embedding.model,
-        state.settings.embedding.dimensions as usize,
-    );
-
-    // Generate query embedding
-    let query_embedding = match embedder.embed(&req.query).await {
+    // Reuse the shared embedder from the orchestrator (avoids creating a new HTTP client per request).
+    let query_embedding = match state.orchestrator.embedder().embed(&req.query).await {
         Ok(emb) => emb,
         Err(e) => {
             return (
@@ -353,14 +366,10 @@ async fn ask(
         .model
         .unwrap_or_else(|| state.settings.rag.model.clone());
 
-    let embedder = Arc::new(OpenAIEmbedder::with_config(
-        &state.settings.embedding.model,
-        state.settings.embedding.dimensions as usize,
-    ));
-
+    // Reuse the shared embedder from the orchestrator (avoids creating a new HTTP client per request).
     let engine = RagEngine::new(
         state.orchestrator.vector_store(),
-        embedder,
+        state.orchestrator.embedder(),
         &model,
         req.max_chunks,
     );
@@ -420,6 +429,19 @@ async fn get_media(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(video_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    // If background processing failed, return 500 so pollers can distinguish it from
+    // "still processing" (404) and surface a meaningful error to the client.
+    {
+        let failed = state.failed_jobs.lock().unwrap();
+        if let Some(error) = failed.get(&video_id) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: error.clone() }),
+            )
+                .into_response();
+        }
+    }
+
     match state
         .orchestrator
         .vector_store()
@@ -433,9 +455,8 @@ async fn get_media(
             }),
         )
             .into_response(),
-        Ok(mut chunks) => {
-            // Sort by start time
-            chunks.sort_by(|a, b| a.start_seconds.partial_cmp(&b.start_seconds).unwrap());
+        Ok(chunks) => {
+            // Chunks are already ORDER BY chunk_order from the SQLite query.
 
             let video_title = chunks.first().map(|c| c.video_title.clone()).unwrap_or_default();
             let total_duration = chunks

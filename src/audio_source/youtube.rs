@@ -101,8 +101,7 @@ impl YoutubeSource {
                 chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d")
                     .ok()
                     .map(|d| {
-                        d.and_hms_opt(0, 0, 0)
-                            .unwrap()
+                        d.and_time(chrono::NaiveTime::MIN)
                             .and_utc()
                     })
             } else {
