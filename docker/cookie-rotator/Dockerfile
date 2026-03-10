@@ -6,6 +6,9 @@ RUN pip install --no-cache-dir \
     azure-identity \
     azure-mgmt-appcontainers
 
+# Install Firefox runtime system dependencies (GTK3, NSS, etc.)
+RUN python -m playwright install-deps firefox
+
 # Downloads the hardened Firefox binary into the image
 RUN python -m camoufox fetch
 
