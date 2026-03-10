@@ -104,7 +104,7 @@ async def run(bootstrap: bool) -> None:
 
     async with AsyncCamoufox(
         headless=True,
-        persistent_context=str(PROFILE_DIR),
+        user_data_dir=str(PROFILE_DIR),
         geoip=True,
     ) as browser:
         context = browser.contexts[0] if browser.contexts else await browser.new_context()
