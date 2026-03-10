@@ -177,4 +177,6 @@ if __name__ == "__main__":
         help="First-run mode: seed YTDLP_COOKIES env var into the persistent browser profile",
     )
     args = parser.parse_args()
-    asyncio.run(run(bootstrap=args.bootstrap))
+    # Auto-detect bootstrap: if no Firefox profile exists yet, seed from YTDLP_COOKIES env var
+    is_new_profile = not (PROFILE_DIR / "prefs.js").exists()
+    asyncio.run(run(bootstrap=args.bootstrap or is_new_profile))
