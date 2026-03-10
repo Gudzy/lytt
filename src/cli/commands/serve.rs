@@ -549,16 +549,24 @@ async fn get_media_summary(
         transcript = transcript,
     );
 
+    let user_msg = match ChatCompletionRequestUserMessageArgs::default()
+        .content(prompt)
+        .build()
+    {
+        Ok(m) => m.into(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+                .into_response()
+        }
+    };
+
     let client = crate::openai::create_client();
     let request = match CreateChatCompletionRequestArgs::default()
         .model(&state.settings.rag.model)
-        .messages(vec![
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
-                .build()
-                .unwrap()
-                .into(),
-        ])
+        .messages(vec![user_msg])
         .temperature(0.3_f32)
         .build()
     {
