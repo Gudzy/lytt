@@ -7,6 +7,9 @@ use crate::config::Settings;
 use crate::embedding::Embedder;
 use crate::orchestrator::Orchestrator;
 use crate::rag::RagEngine;
+use async_openai::types::{
+    ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
+};
 use axum::{
     extract::State,
     http::StatusCode,
@@ -53,6 +56,7 @@ pub async fn run_serve(host: &str, port: u16, settings: Settings) -> anyhow::Res
         .route("/ask", post(ask))
         .route("/media", get(list_media))
         .route("/media/{video_id}", get(get_media))
+        .route("/media/{video_id}/summary", get(get_media_summary))
         .layer(cors)
         .with_state(state);
 
@@ -195,6 +199,11 @@ struct ChunkInfo {
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
+}
+
+#[derive(Serialize)]
+struct SummaryResponse {
+    summary: String,
 }
 
 // === Handlers ===
@@ -489,4 +498,106 @@ async fn get_media(
         )
             .into_response(),
     }
+}
+
+async fn get_media_summary(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(video_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let store = state.orchestrator.sqlite_store();
+
+    // Return cached summary immediately if available.
+    match store.get_summary(&video_id) {
+        Ok(Some(summary)) => return Json(SummaryResponse { summary }).into_response(),
+        Ok(None) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+                .into_response()
+        }
+    }
+
+    // Fetch chunks — they are ORDER BY chunk_order from the SQLite query.
+    let chunks = match state.orchestrator.vector_store().get_by_video_id(&video_id).await {
+        Ok(c) if c.is_empty() => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse { error: format!("Media not found: {}", video_id) }),
+            )
+                .into_response()
+        }
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+                .into_response()
+        }
+    };
+
+    let title = chunks.first().map(|c| c.video_title.as_str()).unwrap_or("Unknown");
+    let transcript: String = chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join(" ");
+
+    let prompt = format!(
+        "Summarize the following YouTube video transcript titled \"{title}\".\n\
+         Write 3–5 concise bullet points covering the main topics, key insights, and \
+         conclusions. Use • for bullet points. Be specific.\n\nTranscript:\n{transcript}",
+        title = title,
+        transcript = transcript,
+    );
+
+    let client = crate::openai::create_client();
+    let request = match CreateChatCompletionRequestArgs::default()
+        .model(&state.settings.rag.model)
+        .messages(vec![
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt)
+                .build()
+                .unwrap()
+                .into(),
+        ])
+        .temperature(0.3_f32)
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: e.to_string() }),
+            )
+                .into_response()
+        }
+    };
+
+    let response = match client.chat().create(request).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("OpenAI error: {}", e) }),
+            )
+                .into_response()
+        }
+    };
+
+    let summary = match response.choices.first().and_then(|c| c.message.content.as_ref()) {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: "Empty response from OpenAI".to_string() }),
+            )
+                .into_response()
+        }
+    };
+
+    // Cache for future requests (failure is non-fatal).
+    if let Err(e) = store.store_summary(&video_id, &summary) {
+        tracing::warn!("Failed to cache summary for {}: {}", video_id, e);
+    }
+
+    Json(SummaryResponse { summary }).into_response()
 }

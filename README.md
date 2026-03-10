@@ -1,384 +1,323 @@
 # Lytt
 
-> **Note:** This project is a work in progress. Features and APIs may change.
+> A local-first CLI for audio transcription and RAG, deployed as an Azure Container App with automated YouTube authentication.
 
-A high-quality, local-first CLI tool for audio transcription and RAG (Retrieval-Augmented Generation).
+Forked from [smebbs/lytt](https://github.com/smebbs/lytt). The original project is a Rust CLI for transcribing audio, building a searchable vector knowledge base, and answering questions via RAG. This fork adds production Azure deployment with automated handling of YouTube's bot detection and cookie-based authentication.
 
-The name "Lytt" comes from the Norwegian/Scandinavian word for "listen."
+---
 
-Lytt lets you transcribe audio content (YouTube videos or local audio/video files), build a searchable knowledge base, and ask questions to get AI-powered answers with citations.
+## What this fork adds
 
-## Features
+| Feature | Description |
+|---|---|
+| **Azure Container App** | HTTP API served from `lytt serve`, deployed to Azure via GitHub Actions |
+| **YouTube bot detection bypass** | bgutil PO token server + yt-dlp-ejs + authenticated cookies |
+| **Automated cookie rotation** | Weekly Container App Job using Camoufox (hardened Firefox) refreshes cookies without human intervention |
+| **Docker image** | Multi-stage build: Rust builder + Debian slim runtime with Python, ffmpeg, yt-dlp, Node.js |
 
-- **Transcribe Audio**: Download and transcribe YouTube videos or local audio/video files using OpenAI Whisper
-- **Playlist/Channel Support**: Batch transcribe entire YouTube playlists or channels
-- **Smart Chunking**: Semantically or temporally chunk transcripts for better retrieval
-- **Custom Prompts**: Customize chunking and RAG prompts with your own templates and variables
-- **Vector Search**: Store embeddings locally in SQLite for fast similarity search
-- **Ask Questions**: Get AI-generated answers from your audio library with source citations
-- **Interactive Chat**: Have a conversation about your audio content
-- **Rechunk Without Re-transcribing**: Update chunking strategy without re-downloading or re-transcribing
-- **MCP Integration**: Use as a tool in Claude Desktop/Code via Model Context Protocol
-- **HTTP API**: REST API for integration with any language/platform
-- **Extensible**: Pluggable architecture for audio sources, vector stores, and more
+---
 
-## Installation
+## Architecture
 
-### Prerequisites
-
-- Rust 1.75+ (for building)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) - for downloading audio from YouTube
-- [ffmpeg](https://ffmpeg.org/) - for audio processing
-- OpenAI API key - for transcription and embeddings
-
-### Build from source
-
-```bash
-git clone https://github.com/smebbs/lytt.git
-cd lytt
-cargo build --release
-
-# Optional: install to PATH
-cargo install --path .
+```
+GitHub push to master
+        │
+        ▼
+GitHub Actions
+  ├─ Build Rust binary
+  ├─ Push image to Azure Container Registry (lyttacr.azurecr.io/lytt)
+  └─ Deploy new revision to Container App
+        │
+        ▼
+Azure Container App: lytt
+  ├─ lytt serve --host 0.0.0.0 --port 8080
+  ├─ entrypoint.sh: decode YTDLP_COOKIES → /tmp/yt-cookies.txt
+  │                 start bgutil PO token server (port 4416)
+  └─ yt-dlp → ffmpeg → Whisper API → OpenAI embeddings → SQLite
+        │
+        ▼ weekly (Mon 03:00 UTC)
+Azure Container App Job: lytt-cookie-rotator
+  ├─ Camoufox (hardened Firefox, headless)
+  ├─ Seeds cookies from Azure Files, visits youtube.com
+  ├─ Collects refreshed cookies
+  └─ Updates YTDLP_COOKIES secret via Azure Management API (Managed Identity)
 ```
 
-### Environment Setup
+---
 
-Set your OpenAI API key:
+## YouTube Bot Detection
 
-```bash
-export OPENAI_API_KEY="your-api-key-here"
+YouTube blocks yt-dlp from cloud datacenter IPs using multiple layers of detection. This deployment works around all of them:
+
+### Problem 1: Proof-of-Origin (PO) tokens
+
+YouTube requires a `pot` parameter signed with browser fingerprint data. yt-dlp cannot generate this alone.
+
+**Solution:** [bgutil-ytdlp-pot-provider](https://github.com/brainicism/bgutil-ytdlp-pot-provider) — a Node.js server that generates valid PO tokens. Runs as a background process in `entrypoint.sh` on port 4416. The [yt-dlp-get-pot](https://github.com/coletdjnz/yt-dlp-get-pot) plugin routes PO token requests to it automatically.
+
+**Pinned versions (required):**
+- `bgutil-ytdlp-pot-provider==1.3.0`
+- `yt-dlp-get-pot<0.3.0`
+
+Version 1.3.1+ of bgutil changed the GetPOT interface in a way that breaks 0.2.x compatibility. Do not upgrade without testing.
+
+### Problem 2: SABR / JS challenges
+
+YouTube serves some responses as encrypted JavaScript challenges (SABR format). yt-dlp needs a JS runtime to solve them.
+
+**Solution:** [yt-dlp-ejs](https://github.com/coletdjnz/yt-dlp-ejs) plugin with Node.js explicitly enabled:
+
+```
+# docker/yt-dlp.conf
+--js-runtimes node:/usr/local/bin/node
 ```
 
-## Quick Start
+yt-dlp defaults to Deno; Node.js must be explicitly declared.
+
+### Problem 3: Cookie authentication
+
+Many YouTube videos are unavailable without authentication from a browser-like session.
+
+**Solution:** Export cookies from a logged-in browser session, base64-encode them, store as the `ytdlp-cookies` Azure Container App secret. `entrypoint.sh` decodes to `/tmp/yt-cookies.txt` at startup. All yt-dlp calls reference this file.
+
+The `player_client=web` option in yt-dlp calls ensures the cookie-authenticated code path is used (other clients trigger more aggressive bot checks).
+
+---
+
+## Automated Cookie Rotation
+
+YouTube cookie sessions last 2–4 weeks. The `lytt-cookie-rotator` Container App Job eliminates manual cookie refresh entirely.
+
+### How it works
+
+1. **Bootstrap (once):** Reads `YTDLP_COOKIES` env var, seeds cookies into Camoufox, visits YouTube, saves refreshed cookies to Azure Files (`/mnt/profile/cookies.txt`)
+2. **Weekly rotation:** Loads `cookies.txt` from Azure Files, seeds into fresh Camoufox context, visits YouTube (renewing cookie TTL server-side), saves new cookies, updates the `ytdlp-cookies` secret in the `lytt` Container App via Azure Management API
+
+The job uses a fresh browser context on every run — not a persistent Firefox profile. Firefox's SQLite databases (cookies.sqlite, places.sqlite) hang for 3+ minutes when accessed over Azure Files (SMB). A single `cookies.txt` text file on Azure Files works without issue.
+
+### Safety guard
+
+If the collected cookie set does not contain any of `SID`, `HSID`, `SSID`, `SAPISID`, `__Secure-1PSID`, or `__Secure-3PSID` — the hallmarks of an authenticated Google session — the job aborts without touching the existing secret. This prevents anonymous cookies from silently overwriting a working session.
+
+### Infrastructure
+
+| Component | Detail |
+|---|---|
+| Image | `lyttacr.azurecr.io/lytt-cookie-rotator:latest` |
+| Schedule | `0 3 * * 1` (every Monday, 03:00 UTC) |
+| Auth | System-assigned Managed Identity with Contributor on `dyngeseth-rg` |
+| State | Azure Files share mounted at `/mnt/profile` (cookies.txt only) |
+| Cost | < $0.10/month (Azure Files 1 GiB + ~3 min Consumption compute/week) |
+
+### Bootstrap a new deployment
 
 ```bash
-# First-time setup (verifies requirements)
-lytt init
+az containerapp job start \
+  --name lytt-cookie-rotator \
+  --resource-group dyngeseth-rg
 
-# Transcribe a YouTube video
-lytt transcribe https://youtube.com/watch?v=VIDEO_ID
-lytt transcribe VIDEO_ID  # Just the ID works too
-
-# Transcribe an entire playlist or channel
-lytt transcribe "https://youtube.com/playlist?list=PLxxxxxxx" --playlist
-lytt transcribe "https://youtube.com/@channelname" --playlist --limit 20
-
-# Transcribe local files
-lytt transcribe /path/to/audio.mp3
-lytt transcribe /path/to/video.mp4
-
-# Ask a question about your audio library
-lytt ask "How does the authentication system work?"
-
-# Search for relevant segments
-lytt search "error handling patterns"
-
-# Start an interactive chat
-lytt chat
-
-# List indexed media
-lytt list
-
-# Rechunk with new settings (no re-transcription)
-lytt rechunk VIDEO_ID
-lytt rechunk all
-
-# Run an AI agent task
-lytt agent "Summarize all videos about machine learning"
-
-# View/edit configuration
-lytt config show
-lytt config edit
+az containerapp job execution logs show \
+  --name lytt-cookie-rotator \
+  --resource-group dyngeseth-rg \
+  --execution-name $(az containerapp job execution list \
+    --name lytt-cookie-rotator --resource-group dyngeseth-rg \
+    --query "[0].name" -o tsv) \
+  --follow
 ```
 
-## CLI Reference
+After a successful bootstrap run, the `YTDLP_COOKIES` env var on the job is no longer needed — the job is self-sustaining from `cookies.txt`.
 
-### `lytt transcribe <input>`
+---
 
-Transcribe and index audio content.
+## CI/CD
 
-```bash
-lytt transcribe INPUT [OPTIONS]
+Two GitHub Actions workflows:
 
-Options:
-  -f, --force       Force re-processing even if already indexed
-  --playlist        Treat input as playlist/channel URL, transcribe all videos
-  --limit N         Max videos to transcribe from playlist (default: 50)
-  -o, --output FILE Export transcript to file instead of indexing
-  --format FORMAT   Output format: json, srt, vtt (default: json)
-  --chunk           Apply semantic chunking to output (use with --output)
-  --embed           Include embeddings in output (requires --chunk)
-  -v, --verbose     Increase verbosity (-v for debug, -vv for trace)
+| Workflow | Trigger | Action |
+|---|---|---|
+| `docker.yml` | Push to `master` | Build Rust image, push to ACR, deploy new Container App revision |
+| `cookie-rotator.yml` | Push to `master` touching `docker/cookie-rotator/**` | Build Python image, push to ACR |
+
+Required secrets: `ACR_LOGIN_SERVER`, `ACR_USERNAME`, `ACR_PASSWORD`, `AZURE_CREDENTIALS`.
+
+---
+
+## Docker image
+
+`Dockerfile` (root) — the main lytt service image:
+
+```
+rust:1.83-bookworm        → cargo build --release
+debian:bookworm-slim      → runtime
+  + python3, pip, ffmpeg
+  + Node.js (LTS)
+  + yt-dlp + bgutil-ytdlp-pot-provider==1.3.0
+  + yt-dlp-get-pot<0.3.0 + yt-dlp-ejs
+  + bgutil Node.js server (FROM brainicism/bgutil-ytdlp-pot-provider:node)
 ```
 
-Supported inputs:
-- YouTube URLs (`https://youtube.com/watch?v=...`)
-- YouTube video IDs (`dQw4w9WgXcQ`)
-- YouTube playlists (`https://youtube.com/playlist?list=...`) with `--playlist`
-- YouTube channels (`https://youtube.com/@channel`) with `--playlist`
-- Local audio files (`.mp3`, `.wav`, `.flac`, `.aac`, `.ogg`, `.opus`, `.m4a`, `.wma`, `.aiff`, `.alac`)
-- Local video files (`.mp4`, `.mkv`, `.avi`, `.mov`, `.webm`, `.flv`, `.wmv`, `.m4v`, `.mpeg`, `.mpg`, `.3gp`)
+`docker/entrypoint.sh` runs at container start:
+1. Decodes `YTDLP_COOKIES` (base64 Netscape format) to `/tmp/yt-cookies.txt`
+2. Starts bgutil PO token server in background (`node build/main.js`)
+3. Waits 3 seconds, then `exec`s the main process
 
-### `lytt ask <question>`
+`docker/config.toml` is baked into the image at `/root/.config/lytt/config.toml`:
+- Whisper transcription, `text-embedding-3-small` embeddings
+- Temporal chunking, SQLite vector store at `/data/lytt.db`
+- GPT-4o-mini for RAG responses
 
-Ask a question and get an answer from your audio library.
-
-```bash
-lytt ask "your question here" [--model MODEL] [--max-chunks N]
-
-Options:
-  -m, --model MODEL        LLM model for response generation (default: gpt-4o-mini)
-  -c, --max-chunks N       Maximum context chunks to include (default: 10)
-```
-
-### `lytt search <query>`
-
-Search for relevant audio segments.
-
-```bash
-lytt search "search query" [--limit N] [--min-score SCORE]
-
-Options:
-  -l, --limit N          Maximum number of results (default: 5)
-  -m, --min-score SCORE  Minimum similarity score 0.0-1.0 (default: 0.3)
-```
-
-### `lytt chat`
-
-Start an interactive chat session with your audio knowledge base.
-
-```bash
-lytt chat [--model MODEL]
-
-Commands during chat:
-  exit, quit  - Exit the chat
-  clear       - Clear conversation history
-```
-
-### `lytt list`
-
-List all indexed media.
-
-### `lytt rechunk <video_id>`
-
-Re-chunk indexed media without re-transcribing.
-
-```bash
-lytt rechunk VIDEO_ID  # Rechunk single video
-lytt rechunk all       # Rechunk all videos with stored transcripts
-```
-
-Useful when you've updated chunking settings or prompts and want to apply them to existing content.
-
-Note: Only works for videos transcribed after the rechunk feature was added. Older videos need `--force` to re-transcribe first.
-
-### `lytt serve`
-
-Start HTTP API server for integration with other systems.
-
-```bash
-lytt serve [--host HOST] [--port PORT]
-
-Options:
-  --host HOST   Host to bind to (default: 127.0.0.1)
-  -p, --port N  Port to bind to (default: 3000)
-```
-
-### `lytt mcp`
-
-Start MCP (Model Context Protocol) server for Claude Desktop/Code integration.
-
-```bash
-lytt mcp
-```
-
-See [AGENTS.md](AGENTS.md) for MCP configuration details.
-
-### `lytt doctor`
-
-Verify system requirements and configuration.
-
-```bash
-lytt doctor
-```
-
-### `lytt init`
-
-Interactive first-run setup.
-
-```bash
-lytt init
-```
-
-### `lytt config`
-
-Manage configuration.
-
-```bash
-lytt config show   # Display current configuration
-lytt config edit   # Open config file in editor
-lytt config path   # Show config file path
-```
+---
 
 ## Configuration
 
-Configuration is stored at `~/.config/lytt/config.toml`. Example:
+`docker/config.toml` (baked into image):
 
 ```toml
 [general]
-data_dir = "~/.lytt"
-temp_dir = "/tmp/lytt"
+data_dir = "/data"
 log_level = "info"
 
 [transcription]
-provider = "whisper"  # or "fusion"
+provider = "whisper"
 model = "whisper-1"
-chunk_duration_seconds = 120
-max_duration_seconds = 7200  # 2 hours
 
 [embedding]
-provider = "openai"
 model = "text-embedding-3-small"
 dimensions = 1536
 
 [chunking]
-strategy = "semantic"  # or "temporal"
-target_chunk_seconds = 180
-min_chunk_seconds = 60
-max_chunk_seconds = 600
+strategy = "temporal"
 
 [vector_store]
-provider = "sqlite"
-sqlite_path = "~/.lytt/vectors.db"
+path = "/data/lytt.db"
 
 [rag]
 enabled = true
 model = "gpt-4o-mini"
 max_context_chunks = 10
-include_timestamps = true
-
-[prompts]
-custom_dir = "~/.lytt/prompts"
-
-[prompts.variables]
-# Custom variables available in all prompts as {{variable_name}}
-language = "English"
-style = "concise"
 ```
 
-### Transcription Modes
+Runtime environment variables (set as Container App secrets/settings):
 
-Lytt supports two transcription modes. Both use LLM cleanup for better punctuation, sentence structure, and error correction.
+| Variable | Description |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI API key for Whisper + embeddings + RAG |
+| `YTDLP_COOKIES` | Base64-encoded Netscape cookie file for YouTube authentication |
 
-#### Whisper (Default)
+---
 
-Uses OpenAI's Whisper API with LLM cleanup. Good balance of speed, cost, and quality.
+## HTTP API
 
-```toml
-[transcription]
-provider = "whisper"
-model = "whisper-1"
+`lytt serve --host 0.0.0.0 --port 8080` starts the REST API.
 
-[transcription.processing]
-cleanup_model = "gpt-4.1"  # Model used for cleanup
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Health check |
+| `/transcribe` | POST | Transcribe and index a YouTube URL |
+| `/status/:id` | GET | Poll transcription job status |
+| `/search` | POST | Semantic search over indexed content |
+| `/ask` | POST | RAG question answering |
+
+---
+
+## Local Development
+
+### Prerequisites
+
+- Rust 1.75+
+- yt-dlp
+- ffmpeg
+- OpenAI API key
+
+### Build
+
+```bash
+git clone https://github.com/Gudzy/lytt.git
+cd lytt
+cargo build --release
 ```
 
-**How it works:**
-1. Whisper transcribes with word-level timestamps
-2. LLM cleans up the text (fixes punctuation, sentence structure, obvious errors)
+### Run CLI
 
-**Advantages:**
-- Fast transcription
-- Lower API costs than full fusion
-- LLM cleanup improves quality over raw Whisper output
+```bash
+export OPENAI_API_KEY="..."
 
-#### Fusion Mode
+# Transcribe a YouTube video
+lytt transcribe https://youtube.com/watch?v=VIDEO_ID
 
-Combines multiple models for maximum accuracy: Whisper provides word-level timestamps, a secondary model (GPT-4o) provides a separate transcription, and an LLM intelligently fuses both together.
+# Ask a question about indexed content
+lytt ask "What topics are covered?"
 
-```toml
-[transcription]
-provider = "fusion"
-
-[transcription.processing]
-timestamp_model = "whisper-1"      # For word timestamps
-text_model = "gpt-4o-transcribe"   # Secondary transcription
-cleanup_model = "gpt-4.1"          # For cleanup and fusion
-max_concurrent = 2
+# Start HTTP API server
+lytt serve
 ```
 
-**How it works:**
-1. Whisper transcribes with word-level timestamps
-2. GPT-4o independently transcribes the same audio
-3. LLM fuses both transcripts, picking the best interpretation for each segment
+### Run with Docker
 
-**Advantages:**
-- Highest accuracy, especially for technical terms, names, and jargon
-- Cross-references two independent transcriptions
-- Better handling of unclear audio or accents
-
-**Trade-offs:**
-- Higher API costs (multiple model calls per segment)
-- Slower processing time
-
-### Custom Prompts
-
-Create custom prompt files in `~/.lytt/prompts/`:
-
-- `chunking.toml` - Controls how transcripts are split into chunks
-- `rag.toml` - Controls question answering responses
-- `cleanup.toml` - Controls transcription cleanup and segment structuring
-
-Example `chunking.toml`:
-```toml
-system = "You are a video content analyst..."
-user = "Analyze this transcript: {{transcript}}\nTarget duration: {{target_duration}} seconds..."
+```bash
+docker build -t lytt .
+docker run -p 8080:8080 \
+  -e OPENAI_API_KEY="..." \
+  -e YTDLP_COOKIES="$(base64 -w0 cookies.txt)" \
+  lytt
 ```
 
-Custom variables from `[prompts.variables]` are available in all prompts as `{{variable_name}}`.
+---
 
-## Architecture
+## CLI Reference
 
-Lytt is built with a modular, extensible architecture:
+### `lytt transcribe <input>`
 
 ```
-Audio Input → Download/Extract (yt-dlp/ffmpeg) → Transcribe (Whisper)
-                                                      ↓
-                                            Chunk (Semantic/Temporal)
-                                                      ↓
-                                            Embed (OpenAI) → Store (SQLite)
-                                                      ↓
-                            Query → Search → Context → LLM → Response
+Options:
+  -f, --force         Force re-processing even if already indexed
+  --playlist          Treat input as playlist/channel URL
+  --limit N           Max videos from playlist (default: 50)
+  -o, --output FILE   Export transcript to file instead of indexing
+  --format FORMAT     Output format: json, srt, vtt (default: json)
 ```
 
-### Extending Lytt
+Supported inputs: YouTube URLs, video IDs, playlist/channel URLs, local audio/video files.
 
-The codebase uses Rust traits for extensibility:
+### `lytt ask <question>`
 
-- `AudioSource` - Add new audio sources (Spotify podcasts, RSS feeds, etc.)
-- `VectorStore` - Use different vector databases (Qdrant, Pinecone, etc.)
-- `Transcriber` - Implement local transcription models
-- `Embedder` - Use different embedding providers
-- `Chunker` - Implement custom chunking strategies
+```
+Options:
+  -m, --model MODEL     LLM model (default: gpt-4o-mini)
+  -c, --max-chunks N    Context chunks to include (default: 10)
+```
 
-## Contributing
+### `lytt search <query>`
 
-Contributions are welcome! Please feel free to submit issues and pull requests.
+```
+Options:
+  -l, --limit N         Max results (default: 5)
+  -m, --min-score N     Min similarity score 0.0–1.0 (default: 0.3)
+```
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+### `lytt serve`
+
+```
+Options:
+  --host HOST   Bind host (default: 127.0.0.1)
+  -p, --port N  Port (default: 3000)
+```
+
+### Other commands
+
+```bash
+lytt list            # List all indexed media
+lytt rechunk all     # Re-chunk with updated settings (no re-transcription)
+lytt chat            # Interactive chat with knowledge base
+lytt mcp             # Start MCP server for Claude Desktop/Code
+lytt config show     # Display configuration
+lytt doctor          # Verify requirements
+```
+
+---
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
-## Acknowledgments
-
-- [OpenAI Whisper](https://openai.com/research/whisper) for transcription
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) for audio downloading
-- [ffmpeg](https://ffmpeg.org/) for audio processing
-- The Rust community for excellent libraries
+Original project by [smebbs](https://github.com/smebbs/lytt).

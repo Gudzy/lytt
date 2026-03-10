@@ -39,6 +39,12 @@ const SCHEMA_SQL: &str = r#"
         duration_seconds REAL NOT NULL,
         transcribed_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS summaries (
+        media_id   TEXT PRIMARY KEY,
+        summary    TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
 "#;
 
 /// SQLite-based vector store.
@@ -480,6 +486,40 @@ impl SqliteVectorStore {
 
         let result: Vec<(String, String, f64)> = rows.filter_map(|r| r.ok()).collect();
         Ok(result)
+    }
+
+    /// Retrieve a cached summary for a media ID.
+    pub fn get_summary(&self, media_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().map_err(|e| {
+            LyttError::VectorStore(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        let result = conn.query_row(
+            "SELECT summary FROM summaries WHERE media_id = ?1",
+            params![media_id],
+            |row| row.get(0),
+        );
+
+        match result {
+            Ok(s) => Ok(Some(s)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Cache a generated summary for a media ID.
+    pub fn store_summary(&self, media_id: &str, summary: &str) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| {
+            LyttError::VectorStore(format!("Failed to acquire lock: {}", e))
+        })?;
+
+        conn.execute(
+            "INSERT OR REPLACE INTO summaries (media_id, summary, created_at) VALUES (?1, ?2, ?3)",
+            params![media_id, summary, Utc::now().to_rfc3339()],
+        )?;
+
+        info!("Cached summary for media {}", media_id);
+        Ok(())
     }
 }
 
