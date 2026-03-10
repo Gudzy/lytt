@@ -30,7 +30,7 @@ from pathlib import Path
 PROFILE_DIR = Path("/mnt/profile")
 RESOURCE_GROUP = "dyngeseth-rg"
 CONTAINER_APP_NAME = "lytt"
-SECRET_NAME = "ytdlp-cookies"
+SECRET_NAME = "ytdlpcookiesv2"
 
 # Domains whose cookies yt-dlp needs for YouTube authentication
 YOUTUBE_DOMAINS = {
