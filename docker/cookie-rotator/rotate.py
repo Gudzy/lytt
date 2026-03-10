@@ -156,7 +156,9 @@ def update_secret(cookies_b64: str) -> None:
 
     # GET redacts secret values; list_secrets() returns the actual values
     actual_secrets = client.container_apps.list_secrets(RESOURCE_GROUP, CONTAINER_APP_NAME).value or []
+    print(f"[rotator] list_secrets returned {len(actual_secrets)} secrets: {[(s.name, bool(s.value)) for s in actual_secrets]}", file=sys.stderr)
     secrets = [s for s in actual_secrets if s.name and s.name != SECRET_NAME]
+    print(f"[rotator] Secrets after filtering: {[s.name for s in secrets]}", file=sys.stderr)
     secrets.append(Secret(name=SECRET_NAME, value=cookies_b64))
     app.configuration.secrets = secrets
 
