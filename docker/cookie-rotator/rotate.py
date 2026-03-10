@@ -2,21 +2,24 @@
 """
 YouTube cookie rotator using Camoufox (hardened Firefox).
 
-Bootstrap (first run — imports existing cookies into persistent browser profile):
-  python rotate.py --bootstrap
-  Reads YTDLP_COOKIES env var (base64 Netscape format), imports into the browser
-  profile stored on Azure Files, visits YouTube to trigger session refresh, exports
-  renewed cookies, and updates the lytt Container App secret.
+State stored on Azure Files: /mnt/profile/cookies.txt (Netscape format).
 
-Rotation (weekly scheduled job — no args):
-  python rotate.py
-  Loads the existing authenticated profile from Azure Files, visits YouTube,
-  exports fresh cookies, updates the lytt Container App secret, and triggers
-  a new lytt revision so the secret takes effect immediately.
+Bootstrap (first run — no cookies.txt yet, or --bootstrap flag):
+  Reads YTDLP_COOKIES env var (base64 Netscape), seeds into a fresh browser,
+  visits YouTube to refresh the session, saves fresh cookies, updates lytt secret.
+
+Rotation (weekly scheduled job):
+  Reads cookies.txt from Azure Files, seeds into a fresh browser, visits YouTube
+  to renew cookie TTL, saves refreshed cookies, updates lytt secret.
+
+NOTE: We deliberately do NOT use a persistent Firefox profile on Azure Files.
+Firefox's SQLite databases (places.sqlite, cookies.sqlite, etc.) over SMB cause
+the browser to hang during initialization, timing out after 3 minutes.
+A single cookies.txt text file on Azure Files works fine.
 
 Environment variables:
   AZURE_SUBSCRIPTION_ID   Azure subscription ID (required)
-  YTDLP_COOKIES           base64-encoded Netscape cookies (required for --bootstrap)
+  YTDLP_COOKIES           base64-encoded Netscape cookies (required when no cookies.txt)
 """
 
 import argparse
@@ -28,6 +31,7 @@ import time
 from pathlib import Path
 
 PROFILE_DIR = Path("/mnt/profile")
+COOKIE_FILE = PROFILE_DIR / "cookies.txt"  # the only persistent state on Azure Files
 RESOURCE_GROUP = "dyngeseth-rg"
 CONTAINER_APP_NAME = "lytt"
 SECRET_NAME = "ytdlpcookiesv2"
@@ -97,27 +101,28 @@ async def run(bootstrap: bool) -> None:
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
-    seed_cookies: list[dict] | None = None
-    if bootstrap:
+    # Determine seed cookies source
+    if bootstrap or not COOKIE_FILE.exists():
         raw_b64 = os.environ.get("YTDLP_COOKIES", "").strip()
         if not raw_b64:
-            print("[rotator] ERROR: YTDLP_COOKIES env var not set; required for --bootstrap", file=sys.stderr)
+            print("[rotator] ERROR: YTDLP_COOKIES env var not set; required when no cookies.txt exists", file=sys.stderr)
             sys.exit(1)
         netscape = base64.b64decode(raw_b64).decode("utf-8", errors="replace")
         seed_cookies = netscape_to_playwright(netscape)
-        print(f"[rotator] Bootstrap: seeding {len(seed_cookies)} cookies into profile", file=sys.stderr)
+        print(f"[rotator] Bootstrap: seeding {len(seed_cookies)} cookies from YTDLP_COOKIES env var", file=sys.stderr)
+    else:
+        netscape = COOKIE_FILE.read_text()
+        seed_cookies = netscape_to_playwright(netscape)
+        print(f"[rotator] Rotation: seeding {len(seed_cookies)} cookies from {COOKIE_FILE}", file=sys.stderr)
 
-    async with AsyncCamoufox(
-        headless=True,
-        persistent_context=True,
-        user_data_dir=str(PROFILE_DIR),
-        geoip=True,
-    ) as context:
-        if seed_cookies:
-            await context.add_cookies(seed_cookies)
+    # Fresh browser context — NO persistent profile on Azure Files.
+    # Firefox profile SQLite DBs over SMB cause a 3-minute initialization hang.
+    # A fresh browser with seeded cookies is equivalent for our purposes.
+    async with AsyncCamoufox(headless=True, geoip=False) as browser:
+        context = await browser.new_context()
+        await context.add_cookies(seed_cookies)
 
         page = await context.new_page()
-
         print("[rotator] Visiting youtube.com ...", file=sys.stderr)
         await page.goto("https://www.youtube.com", wait_until="domcontentloaded", timeout=60_000)
         # Wait for YouTube to settle and issue refreshed Set-Cookie headers
@@ -130,12 +135,10 @@ async def run(bootstrap: bool) -> None:
         else:
             print("[rotator] WARNING: account button not found — may not be logged in", file=sys.stderr)
 
-        # Collect ALL cookies (no URL filter); domain filtering happens in cookies_to_netscape
         cookies = await context.cookies()
         print(f"[rotator] Collected {len(cookies)} cookies", file=sys.stderr)
 
     # Safety guard: refuse to update the secret with anonymous cookies.
-    # An anonymous session has ~5 cookies with no auth tokens.
     # Overwriting the existing secret with them would break yt-dlp authentication.
     collected_names = {c["name"] for c in cookies}
     if not (_AUTH_COOKIE_NAMES & collected_names):
@@ -143,7 +146,8 @@ async def run(bootstrap: bool) -> None:
             "[rotator] ERROR: no auth cookies found in collected set "
             f"(names: {sorted(collected_names)}) — "
             "session is not logged in. Aborting to preserve existing cookies. "
-            "Fix: delete /mnt/profile and re-run with a fresh YTDLP_COOKIES env var.",
+            "Fix: update YTDLP_COOKIES env var with fresh cookies and delete "
+            f"{COOKIE_FILE} so bootstrap re-runs.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -151,6 +155,10 @@ async def run(bootstrap: bool) -> None:
     netscape_text = cookies_to_netscape(cookies)
     youtube_count = netscape_text.count("\n") - 1  # exclude header line
     print(f"[rotator] Filtered to {youtube_count} YouTube/Google cookies", file=sys.stderr)
+
+    # Save refreshed cookies for the next rotation run
+    COOKIE_FILE.write_text(netscape_text)
+    print(f"[rotator] Saved refreshed cookies to {COOKIE_FILE}", file=sys.stderr)
 
     cookies_b64 = base64.b64encode(netscape_text.encode()).decode()
     update_secret(cookies_b64)
@@ -190,7 +198,6 @@ def update_secret(cookies_b64: str) -> None:
         if reg.identity:
             r["identity"] = reg.identity
         elif reg.username and reg.password_secret_ref:
-            # Only include username+password if BOTH are non-empty
             r["username"] = reg.username
             r["passwordSecretRef"] = reg.password_secret_ref
         # else: no valid credentials — include server only;
@@ -263,9 +270,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--bootstrap",
         action="store_true",
-        help="First-run mode: seed YTDLP_COOKIES env var into the persistent browser profile",
+        help="Force bootstrap mode: seed YTDLP_COOKIES env var even if cookies.txt exists",
     )
     args = parser.parse_args()
-    # Auto-detect bootstrap: if no Firefox profile exists yet, seed from YTDLP_COOKIES env var
-    is_new_profile = not (PROFILE_DIR / "prefs.js").exists()
-    asyncio.run(run(bootstrap=args.bootstrap or is_new_profile))
+    # Bootstrap if cookies.txt doesn't exist yet (first run or manual reset)
+    is_bootstrap = not COOKIE_FILE.exists()
+    asyncio.run(run(bootstrap=args.bootstrap or is_bootstrap))
