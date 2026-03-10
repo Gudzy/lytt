@@ -139,9 +139,10 @@ async def run(bootstrap: bool) -> None:
 
 def update_secret(cookies_b64: str) -> None:
     """Update YTDLP_COOKIES in the lytt Container App via Managed Identity."""
+    import json
+    import urllib.request
     from azure.identity import ManagedIdentityCredential
     from azure.mgmt.appcontainers import ContainerAppsAPIClient
-    from azure.mgmt.appcontainers.models import Secret
 
     subscription_id = os.environ.get("AZURE_SUBSCRIPTION_ID")
     if not subscription_id:
@@ -151,32 +152,60 @@ def update_secret(cookies_b64: str) -> None:
     credential = ManagedIdentityCredential()
     client = ContainerAppsAPIClient(credential, subscription_id)
 
-    print(f"[rotator] Fetching current definition of Container App '{CONTAINER_APP_NAME}' ...", file=sys.stderr)
-    app = client.container_apps.get(RESOURCE_GROUP, CONTAINER_APP_NAME)
-
     # GET redacts secret values; list_secrets() returns the actual values
     actual_secrets = client.container_apps.list_secrets(RESOURCE_GROUP, CONTAINER_APP_NAME).value or []
-    print(f"[rotator] list_secrets returned {len(actual_secrets)} secrets: {[(s.name, bool(s.value)) for s in actual_secrets]}", file=sys.stderr)
-    secrets = [s for s in actual_secrets if s.name and s.name != SECRET_NAME]
-    print(f"[rotator] Secrets after filtering: {[s.name for s in secrets]}", file=sys.stderr)
-    secrets.append(Secret(name=SECRET_NAME, value=cookies_b64))
-    app.configuration.secrets = secrets
+    print(f"[rotator] list_secrets: {[(s.name, bool(s.value)) for s in actual_secrets]}", file=sys.stderr)
+    secrets = [
+        {"name": s.name, "value": s.value}
+        for s in actual_secrets
+        if s.name and s.name != SECRET_NAME
+    ]
+    secrets.append({"name": SECRET_NAME, "value": cookies_b64})
+    print(f"[rotator] Secrets to write: {[s['name'] for s in secrets]}", file=sys.stderr)
 
-    # Force a new revision so the updated secret is picked up immediately
     suffix = str(int(time.time()))
-    app.template.revision_suffix = suffix
 
-    # Registries using Managed Identity have password_secret_ref='' from GET.
-    # Azure rejects that as an invalid secret name on PUT — clear it to None.
-    if app.configuration.registries:
-        print(f"[rotator] Registries: {[(r.server, repr(r.password_secret_ref)) for r in app.configuration.registries]}", file=sys.stderr)
-        for reg in app.configuration.registries:
-            if not reg.password_secret_ref:
-                reg.password_secret_ref = None
+    # Use a raw PATCH so we only send what we intend to change.
+    # begin_create_or_update (PUT) serializes the full app object from GET,
+    # including registry.password_secret_ref="" which Azure rejects as invalid.
+    token = credential.get_token("https://management.azure.com/.default").token
+    api_version = "2024-03-01"
+    url = (
+        f"https://management.azure.com/subscriptions/{subscription_id}"
+        f"/resourceGroups/{RESOURCE_GROUP}/providers/Microsoft.App"
+        f"/containerApps/{CONTAINER_APP_NAME}?api-version={api_version}"
+    )
+    patch_body = json.dumps({
+        "properties": {
+            "configuration": {"secrets": secrets},
+            "template": {"revisionSuffix": suffix},
+        }
+    }).encode()
 
-    print(f"[rotator] Updating secret and creating revision (suffix={suffix}) ...", file=sys.stderr)
-    client.container_apps.begin_create_or_update(RESOURCE_GROUP, CONTAINER_APP_NAME, app).result()
-    print(f"[rotator] Secret '{SECRET_NAME}' updated and new revision deployed.", file=sys.stderr)
+    print(f"[rotator] PATCHing Container App (suffix={suffix}) ...", file=sys.stderr)
+    req = urllib.request.Request(
+        url,
+        data=patch_body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="PATCH",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            status = resp.status
+            body = resp.read().decode(errors="replace")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        print(f"[rotator] ERROR: PATCH returned {exc.code}: {body[:500]}", file=sys.stderr)
+        sys.exit(1)
+
+    if status not in (200, 201, 202):
+        print(f"[rotator] ERROR: unexpected status {status}: {body[:500]}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"[rotator] Secret '{SECRET_NAME}' updated (HTTP {status}); new revision suffix={suffix}.", file=sys.stderr)
 
 
 if __name__ == "__main__":
