@@ -43,6 +43,11 @@ YOUTUBE_DOMAINS = {
     ".ytimg.com",
 }
 
+# Cookies only present in a logged-in Google/YouTube session.
+# If none of these are collected, the browser is anonymous and we must NOT
+# overwrite the existing (working) secret with useless anonymous cookies.
+_AUTH_COOKIE_NAMES = {"SID", "HSID", "SSID", "SAPISID", "__Secure-1PSID", "__Secure-3PSID"}
+
 
 def cookies_to_netscape(cookies: list[dict]) -> str:
     """Convert Playwright cookie dicts to Netscape cookie file format for yt-dlp."""
@@ -125,8 +130,23 @@ async def run(bootstrap: bool) -> None:
         else:
             print("[rotator] WARNING: account button not found — may not be logged in", file=sys.stderr)
 
-        cookies = await context.cookies(["https://www.youtube.com", "https://google.com"])
+        # Collect ALL cookies (no URL filter); domain filtering happens in cookies_to_netscape
+        cookies = await context.cookies()
         print(f"[rotator] Collected {len(cookies)} cookies", file=sys.stderr)
+
+    # Safety guard: refuse to update the secret with anonymous cookies.
+    # An anonymous session has ~5 cookies with no auth tokens.
+    # Overwriting the existing secret with them would break yt-dlp authentication.
+    collected_names = {c["name"] for c in cookies}
+    if not (_AUTH_COOKIE_NAMES & collected_names):
+        print(
+            "[rotator] ERROR: no auth cookies found in collected set "
+            f"(names: {sorted(collected_names)}) — "
+            "session is not logged in. Aborting to preserve existing cookies. "
+            "Fix: delete /mnt/profile and re-run with a fresh YTDLP_COOKIES env var.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     netscape_text = cookies_to_netscape(cookies)
     youtube_count = netscape_text.count("\n") - 1  # exclude header line
@@ -141,6 +161,7 @@ def update_secret(cookies_b64: str) -> None:
     """Update YTDLP_COOKIES in the lytt Container App via Managed Identity."""
     import json
     import urllib.request
+    import urllib.error
     from azure.identity import ManagedIdentityCredential
     from azure.mgmt.appcontainers import ContainerAppsAPIClient
 
@@ -152,7 +173,31 @@ def update_secret(cookies_b64: str) -> None:
     credential = ManagedIdentityCredential()
     client = ContainerAppsAPIClient(credential, subscription_id)
 
-    # GET redacts secret values; list_secrets() returns the actual values
+    # GET app to read registry config.
+    # The existing registry.password_secret_ref="" causes Azure to reject any update:
+    # it treats "" as a reference to a secret that must be defined with a value.
+    # We include a clean registry list in the PATCH body to fix this at the root.
+    app = client.container_apps.get(RESOURCE_GROUP, CONTAINER_APP_NAME)
+
+    registries_json = []
+    for reg in (app.configuration.registries or []):
+        print(
+            f"[rotator] Registry: server={reg.server!r} identity={reg.identity!r} "
+            f"username={reg.username!r} pwd_ref={reg.password_secret_ref!r}",
+            file=sys.stderr,
+        )
+        r: dict = {"server": reg.server}
+        if reg.identity:
+            r["identity"] = reg.identity
+        elif reg.username and reg.password_secret_ref:
+            # Only include username+password if BOTH are non-empty
+            r["username"] = reg.username
+            r["passwordSecretRef"] = reg.password_secret_ref
+        # else: no valid credentials — include server only;
+        # Azure uses the Container Apps environment identity for ACR pull
+        registries_json.append(r)
+
+    # GET redacts secret values; list_secrets() returns the actual values.
     actual_secrets = client.container_apps.list_secrets(RESOURCE_GROUP, CONTAINER_APP_NAME).value or []
     print(f"[rotator] list_secrets: {[(s.name, bool(s.value)) for s in actual_secrets]}", file=sys.stderr)
     secrets = [
@@ -165,9 +210,14 @@ def update_secret(cookies_b64: str) -> None:
 
     suffix = str(int(time.time()))
 
-    # Use a raw PATCH so we only send what we intend to change.
-    # begin_create_or_update (PUT) serializes the full app object from GET,
-    # including registry.password_secret_ref="" which Azure rejects as invalid.
+    # PATCH — only send the fields we intend to change.
+    # ARM PATCH deep-merges objects, so configuration.ingress, template.containers,
+    # template.scale, etc. are all preserved unchanged.
+    # Arrays (secrets, registries) are replaced in their entirety — that is intentional.
+    config_patch: dict = {"secrets": secrets}
+    if registries_json:
+        config_patch["registries"] = registries_json
+
     token = credential.get_token("https://management.azure.com/.default").token
     api_version = "2024-03-01"
     url = (
@@ -177,7 +227,7 @@ def update_secret(cookies_b64: str) -> None:
     )
     patch_body = json.dumps({
         "properties": {
-            "configuration": {"secrets": secrets},
+            "configuration": config_patch,
             "template": {"revisionSuffix": suffix},
         }
     }).encode()
