@@ -166,6 +166,14 @@ def update_secret(cookies_b64: str) -> None:
     suffix = str(int(time.time()))
     app.template.revision_suffix = suffix
 
+    # Registries using Managed Identity have password_secret_ref='' from GET.
+    # Azure rejects that as an invalid secret name on PUT — clear it to None.
+    if app.configuration.registries:
+        print(f"[rotator] Registries: {[(r.server, repr(r.password_secret_ref)) for r in app.configuration.registries]}", file=sys.stderr)
+        for reg in app.configuration.registries:
+            if not reg.password_secret_ref:
+                reg.password_secret_ref = None
+
     print(f"[rotator] Updating secret and creating revision (suffix={suffix}) ...", file=sys.stderr)
     client.container_apps.begin_create_or_update(RESOURCE_GROUP, CONTAINER_APP_NAME, app).result()
     print(f"[rotator] Secret '{SECRET_NAME}' updated and new revision deployed.", file=sys.stderr)
