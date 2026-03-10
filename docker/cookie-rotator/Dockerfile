@@ -1,14 +1,12 @@
 FROM python:3.12-slim
 
-# Playwright + Camoufox + Azure SDK
+# camoufox bundles its own playwright integration — no separate playwright install needed
 RUN pip install --no-cache-dir \
-    playwright \
-    playwright-camoufox \
     "camoufox[geoip]" \
     azure-identity \
     azure-mgmt-appcontainers
 
-# Camoufox downloads its own hardened Firefox binary
+# Downloads the hardened Firefox binary into the image
 RUN python -m camoufox fetch
 
 COPY rotate.py /rotate.py
