@@ -53,7 +53,7 @@ impl YoutubeSource {
                 "--no-warnings",
                 "--ignore-errors",
                 "--cookies", "/tmp/yt-cookies.txt",
-                "--extractor-args", "youtube:player_client=web",
+                "--extractor-args", "youtube:player_client=tv_embedded,web",
                 &url,
             ])
             .output()
@@ -156,7 +156,7 @@ impl AudioSource for YoutubeSource {
                 "--playlist-end",
                 &limit_str,
                 "--cookies", "/tmp/yt-cookies.txt",
-                "--extractor-args", "youtube:player_client=web",
+                "--extractor-args", "youtube:player_client=tv_embedded,web",
                 source,
             ])
             .output()
