@@ -3,6 +3,8 @@ name: Build, publish and deploy
 on:
   push:
     branches: [main, master]
+  schedule:
+    - cron: '0 4 * * *'  # daily at 04:00 UTC — after cookie rotator (03:00)
 
 jobs:
   build-and-push:
@@ -30,6 +32,7 @@ jobs:
           tags: |
             ${{ secrets.ACR_LOGIN_SERVER }}/lytt:latest
             ${{ secrets.ACR_LOGIN_SERVER }}/lytt:${{ github.sha }}
+          pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
