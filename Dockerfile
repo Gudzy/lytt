@@ -1,7 +1,3 @@
-# ── Stage 0: bgutil PO token server ─────────────────────────────────────────
-# Copies the pre-built bgutil server (Node.js + compiled JS) from the official image.
-FROM brainicism/bgutil-ytdlp-pot-provider:node AS bgutil-server
-
 # ── Stage 1: Rust build ─────────────────────────────────────────────────────
 FROM rust:1.83-bookworm AS builder
 
@@ -28,27 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/lytt /usr/local/bin/lytt
 
-# Copy Node.js binary and bgutil server from the official bgutil image.
-# bgutil generates YouTube Proof-of-Origin tokens needed from cloud/datacenter IPs.
-COPY --from=bgutil-server /usr/local/bin/node /usr/local/bin/node
-COPY --from=bgutil-server /app /bgutil-server
-
-# yt-dlp and GetPOT look for 'nodejs' (Debian package name) to detect the JS runtime.
-RUN ln -s /usr/local/bin/node /usr/local/bin/nodejs
-
-# bgutil-ytdlp-pot-provider's script-node provider looks for scripts at this path.
-# Symlink our /bgutil-server to the expected location.
-RUN mkdir -p /root/bgutil-ytdlp-pot-provider && \
-    ln -s /bgutil-server /root/bgutil-ytdlp-pot-provider/server
-
 # Runtime data directory for SQLite vector store.
-RUN mkdir -p /data /root/.config/lytt /root/.config/yt-dlp
+RUN mkdir -p /data /root/.config/lytt
 
 # Bake in a minimal config. OPENAI_API_KEY is supplied as an env var at runtime.
 COPY docker/config.toml /root/.config/lytt/config.toml
-
-# yt-dlp config: enable Node.js EJS runtime (deno-only by default).
-COPY docker/yt-dlp.conf /root/.config/yt-dlp/config
 
 # Entrypoint: write YouTube cookies from env var before starting lytt.
 COPY docker/entrypoint.sh /entrypoint.sh
