@@ -28,8 +28,8 @@ pub async fn download_audio(url: &str, video_id: &str, output_dir: &Path) -> Res
 
     let template = output_dir.join(format!("{}.%(ext)s", video_id));
 
-    let result = Command::new("yt-dlp")
-        .arg("--extract-audio")
+    let mut cmd = Command::new("yt-dlp");
+    cmd.arg("--extract-audio")
         .arg("--audio-format").arg("mp3")
         .arg("--audio-quality").arg("0")
         .arg("--output").arg(template.to_str().unwrap_or_default())
@@ -37,8 +37,13 @@ pub async fn download_audio(url: &str, video_id: &str, output_dir: &Path) -> Res
         .arg("--quiet")
         .arg("--no-warnings")
         .arg("--cookies").arg("/tmp/yt-cookies.txt")
-        .arg("--extractor-args").arg("youtube:player_client=web")
-        .arg(url)
+        .arg("--extractor-args").arg("youtube:player_client=web");
+    if let Ok(proxy) = std::env::var("WEBSHARE_PROXY_URL") {
+        if !proxy.is_empty() { cmd.arg("--proxy").arg(proxy); }
+    }
+    cmd.arg(url);
+
+    let result = cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()

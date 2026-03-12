@@ -46,16 +46,21 @@ impl YoutubeSource {
     async fn fetch_metadata_ytdlp(&self, video_id: &str) -> Result<MediaMetadata> {
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
 
-        let output = tokio::process::Command::new("yt-dlp")
-            .args([
-                "--dump-json",
-                "--no-download",
-                "--no-warnings",
-                "--ignore-errors",
-                "--cookies", "/tmp/yt-cookies.txt",
-                "--extractor-args", "youtube:player_client=web",
-                &url,
-            ])
+        let mut meta_cmd = tokio::process::Command::new("yt-dlp");
+        meta_cmd.args([
+            "--dump-json",
+            "--no-download",
+            "--no-warnings",
+            "--ignore-errors",
+            "--cookies", "/tmp/yt-cookies.txt",
+            "--extractor-args", "youtube:player_client=web",
+        ]);
+        if let Ok(proxy) = std::env::var("WEBSHARE_PROXY_URL") {
+            if !proxy.is_empty() { meta_cmd.args(["--proxy", &proxy]); }
+        }
+        meta_cmd.arg(&url);
+
+        let output = meta_cmd
             .output()
             .await
             .map_err(|e| {
@@ -147,18 +152,23 @@ impl AudioSource for YoutubeSource {
         // For playlists/channels, use yt-dlp to get video list
         let limit_str = limit.map(|l| l.to_string()).unwrap_or_else(|| "50".to_string());
 
-        let output = tokio::process::Command::new("yt-dlp")
-            .args([
-                "--dump-json",
-                "--no-download",
-                "--no-warnings",
-                "--flat-playlist",
-                "--playlist-end",
-                &limit_str,
-                "--cookies", "/tmp/yt-cookies.txt",
-                "--extractor-args", "youtube:player_client=web",
-                source,
-            ])
+        let mut list_cmd = tokio::process::Command::new("yt-dlp");
+        list_cmd.args([
+            "--dump-json",
+            "--no-download",
+            "--no-warnings",
+            "--flat-playlist",
+            "--playlist-end",
+            &limit_str,
+            "--cookies", "/tmp/yt-cookies.txt",
+            "--extractor-args", "youtube:player_client=web",
+        ]);
+        if let Ok(proxy) = std::env::var("WEBSHARE_PROXY_URL") {
+            if !proxy.is_empty() { list_cmd.args(["--proxy", &proxy]); }
+        }
+        list_cmd.arg(source);
+
+        let output = list_cmd
             .output()
             .await
             .map_err(|e| {
