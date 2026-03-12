@@ -1,6 +1,7 @@
 # ── Stage 0: bgutil PO token server ─────────────────────────────────────────
-# Copies the pre-built bgutil server (Node.js + compiled JS) from the official image.
-FROM brainicism/bgutil-ytdlp-pot-provider:node AS bgutil-server
+# Pinned to 1.3.0-node (immutable tag). The mutable :node tag updated to 1.3.1
+# which is incompatible with bgutil-ytdlp-pot-provider==1.3.0 + yt-dlp-get-pot<0.3.0.
+FROM brainicism/bgutil-ytdlp-pot-provider:1.3.0-node AS bgutil-server
 
 # ── Stage 1: Rust build ─────────────────────────────────────────────────────
 FROM rust:1.83-bookworm AS builder
