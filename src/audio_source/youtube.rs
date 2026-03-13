@@ -50,11 +50,13 @@ impl YoutubeSource {
         meta_cmd.args([
             "--dump-json",
             "--no-download",
-            "--no-check-formats",  // skip format URL validation — we only need metadata fields
+            "--no-check-formats",
             "--no-warnings",
             "--ignore-errors",
             "--cookies", "/tmp/yt-cookies.txt",
-            "--extractor-args", "youtube:player_client=web",
+            // tv_embedded returns non-SABR format list — WEB client now returns SABR-only
+            // formats that yt-dlp can't process without a JS runtime.
+            "--extractor-args", "youtube:player_client=tv_embedded",
         ]);
         if let Ok(proxy) = std::env::var("WEBSHARE_PROXY_URL") {
             if !proxy.is_empty() { meta_cmd.args(["--proxy", &proxy]); }
@@ -162,7 +164,7 @@ impl AudioSource for YoutubeSource {
             "--playlist-end",
             &limit_str,
             "--cookies", "/tmp/yt-cookies.txt",
-            "--extractor-args", "youtube:player_client=web",
+            "--extractor-args", "youtube:player_client=tv_embedded",
         ]);
         if let Ok(proxy) = std::env::var("WEBSHARE_PROXY_URL") {
             if !proxy.is_empty() { list_cmd.args(["--proxy", &proxy]); }
