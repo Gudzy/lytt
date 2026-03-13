@@ -50,6 +50,7 @@ impl YoutubeSource {
         meta_cmd.args([
             "--dump-json",
             "--no-download",
+            "--no-check-formats",  // skip format URL validation — we only need metadata fields
             "--no-warnings",
             "--ignore-errors",
             "--cookies", "/tmp/yt-cookies.txt",

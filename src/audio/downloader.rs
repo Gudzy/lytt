@@ -37,7 +37,9 @@ pub async fn download_audio(url: &str, video_id: &str, output_dir: &Path) -> Res
         .arg("--quiet")
         .arg("--no-warnings")
         .arg("--cookies").arg("/tmp/yt-cookies.txt")
-        .arg("--extractor-args").arg("youtube:player_client=web");
+        // tv_embedded gives progressive MP4 format list (no SABR) — reliable for audio extraction.
+        // WEB client now returns SABR-only formats that require JS execution to download.
+        .arg("--extractor-args").arg("youtube:player_client=tv_embedded");
     if let Ok(proxy) = std::env::var("WEBSHARE_PROXY_URL") {
         if !proxy.is_empty() { cmd.arg("--proxy").arg(proxy); }
     }
